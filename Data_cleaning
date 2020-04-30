@@ -9,6 +9,8 @@ library(plyr)
 library(dplyr)
 library(lubridate)
 library(timetk)
+library(geojson)
+library(sf)
 
 #1. Baywheels regions table
 regions <- jsonlite::read_json("https://gbfs.baywheels.com/gbfs/es/system_regions.json") ##Reading in JSON dataset as list
