@@ -1,0 +1,120 @@
+####Three data sources for Lyft Baywheels data:
+  #1. Baywheels regions table
+  #2. Baywheels stations table
+  #3. San Francisco neighborhood geo-boundaries 
+  #4. Monthly Baywheels trips data
+
+##Libraries used
+library(plyr)
+library(dplyr)
+library(lubridate)
+library(timetk)
+
+#1. Baywheels regions table
+regions <- jsonlite::read_json("https://gbfs.baywheels.com/gbfs/es/system_regions.json") ##Reading in JSON dataset as list
+region_df <- data.frame(station_id=character(), region_name=character()) ##Declares an empty data frame
+
+region_func <- function(json_df) {  ###Function to extract all of the region information from the JSON list
+  for (i in 1:length(json_df$data$regions)) {
+    id_temp <- json_df$data$regions[[i]]$region_id
+    name_temp <- json_df$data$regions[[i]]$name
+    
+    temp.df <- data.frame(station_id=id_temp,region_name=name_temp)
+    region_df <<- rbind(region_df,temp.df)
+  }
+}
+
+region_func(regions) ## Creates the station dataframe
+
+region_df$station_id <- mapvalues(region_df$station_id, ## Reassigns new levels to the regions for clarity
+                             from = c('3','5','12','13','14','23'), 
+                             to = c('1','2','3','4','5','6'))
+       
+          
+
+#2. Baywheels station table
+stations <- jsonlite::read_json("https://gbfs.baywheels.com/gbfs/en/station_information.json")  ##Reading in JSON dataset as list
+station_df <- data.frame(station_id=numeric(), station_name=character(), region_id=character(),lat=numeric(),lon=numeric()) ##Declares an empty data frame
+
+station_func <- function(json_df) {      ###Function to extract all of the station info from the JSON list
+  for (i in 1:length(json_df$data$stations)) {
+    id_temp <- json_df$data$stations[[i]]$station_id
+    name_temp <- json_df$data$stations[[i]]$name
+    region_temp <-ifelse(is.null(try(json_df$data$stations[[i]]$region_id)),99,json_df$data$stations[[i]]$region_id)
+    lat_temp <- json_df$data$stations[[i]]$lat
+    lon_temp <- json_df$data$stations[[i]]$lon
+    
+    temp.df <- data.frame(station_id=id_temp,station_name=name_temp,region_id=region_temp,lat=lat_temp,lon=lon_temp)
+    
+    station_df <<- rbind(station_df,temp.df)
+  }
+}
+
+station_func(stations) ## Creates the station dataframe
+
+station_df$region_id <- mapvalues(station_df$region_id,   ## Reassigns new levels to the regions for clarity
+                                  from = c('3','5','12','13','14'), 
+                                  to = c('1','2','3','4','5'))
+
+#3. San Francisco neighborhood geo-boundaries
+##SF neighborhood data: https://data.sfgov.org/Geographic-Locations-and-Boundaries/Analysis-Neighborhoods/p5b7-5n3h  ---> export as GeoJSON
+sf_geo <- geojsonio::geojson_read(file.choose(new = FALSE), what = "sp")  ## choose the GeoJSON file downloaded
+sf_geo_trans <- st_transform(st_as_sf(sf_geo), crs = 4326) 
+
+lat_lon_func <- function(data, lat_name, lon_name) {  ## function to intersections between input coordinate values and the SF neighborhood boundaries
+  int <<- data %>%
+            select(lat_name,lon_name) %>%
+            st_as_sf(coords=c(lon_name,lat_name), crs=4326) %>% 
+            st_intersects(sf_geo_trans)
+  int[sapply(int, function(x) length(x)==0L)] <<- NA
+}
+
+lat_lon_func(station_df, 'lat', 'lon') ## Finding the intersection between Baywheel station locations and SF neighborhood boundaries
+
+## Merging data tables
+station_df$nhood <- as.character(sf_geo_trans$nhood[unlist(int)]) ## Creating a neighborhood variable based on the coordinate interesction
+station_df$region_id <- ifelse(!is.na(station_df$nhood) & is.na(station_df$region_id),'1',station_df$region_id) ## Assigns a region id of 1 (San Francisco) to stations that might have a SF neighborhood but no assigned region yet due to new stations/updates
+station_df$station_id <- as.character(station_df$station_id) ##Transforms station_id as character instead of levels for future data merging accuracy
+
+#4. Monthly Baywheels trips data
+## Baywheels monthly published data https://www.lyft.com/bikes/bay-wheels/system-data: data used for analysis 2/19-1/20
+files <- list.files(path = "~/Lyft/Data", pattern = "*.csv", full.names = T) ##Reads in all of the downloaded datafiles from a single folder
+lyft_data <- ldply(files, read_csv) ##transforms the list of datafiles into a single dataframe
+
+##### Data cleaning of Baywheels trip data
+##Converting variables to date time format
+var_list <- c("start_time", "end_time")
+for (i in 1:length(var_list)) {
+  lyft_data[[var_list[i]]] <- as.POSIXct(lyft_data[[var_list[i]]], tz=  "America/Los_Angeles")
+}
+
+## List of variables to remove after feature engineering (not needed for analysis)
+var_rmve <- c('end_time', 'end_station_id', 'end_station_name', 'end_station_latitude', 'end_station_longitude', 'bike_id',
+              'diff', 'index', 'index.num', 'half', 'hour12', 'wday.xts', 'mweek', 'week', 'week.iso', 
+              'week2', 'week3', 'week4', 'mday7')
+              
+## Handy dplyr data wrangling
+lyft_data <- lyft_data %>%
+  cbind(as.data.frame(tk_get_timeseries_signature(lyft_data$start_time))) %>% ## Adds many time series variables based on the start time
+  rename(wday_name = wday.lbl) %>% ## Renames the weekday name of of the start time
+  mutate(start_date = date(lyft_data$start_time), ## Creates the date of the start time
+         duration_min = lyft_data$duration_sec/60, ## Creates the duration in minutes of the bike trip
+         bike_type = ifelse(is.na(lyft_data$start_station_id), "Dockless", "Classic"), ## Creates bike_type var if it is dockless or not, based if there is a station id associated with the trip
+         start_station_id = as.character(lyft_data$start_station_id)) %>% ## Transforms start_station_id to character instead of factor for merging accuracy
+  select(-var_rmve)
+
+lyft_data <- lyft_data %>%  ## Creates a weekend flag based on the weekday
+  mutate(wnkd_flag = ifelse(lyft_data$wday_name == "Saturday" | lyft_data$wday_name == "Sunday", "Weekend", "Weekday"))
+  
+lat_lon_func(lyft_data,'start_station_latitude','start_station_longitude') ## Uses the lat_lon_func from above to find the intersection of start location coordinates and SF neighborhood
+lyft_data <- mutate(lyft_data, nhood = as.character(sf_geo_trans$nhood[unlist(int)])) ## Adds the neighborhood variable to trip data
+
+lyft_data <- lyft_data %>% ## Merges the station data frame information onto the trips data for region analysis
+              left_join(select(station_df,station_id,region_id), 
+                        by = c("start_station_id" = "station_id"))
+
+lyft_data$region_id <- ifelse(!is.na(lyft_data$nhood) & is.na(lyft_data$region_id),'1',lyft_data$region_id)  ## Assigns San Fran region ID to dockless bikes that are found in a SF neighborhood
+
+##### End of all data cleaning!
+
+
