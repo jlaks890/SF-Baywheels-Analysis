@@ -1,0 +1,32 @@
+### After data cleaning, code to explore data with visualizations, discovering any patterns and insights to determine the final model
+
+
+#######Anlysis Plan:
+### 1. Map of Baywheels bike stations around SF: understand where most travelers are forced to pick-up/drop-off bikes
+
+
+# 1. Map of Baywheels bike stations in SF
+library(dplyr)
+library(sf)
+
+nhOOd_stat_tally <- as.data.frame(station_df %>% filter(region_id == "1") %>%   ### Creates a table for the count of stations per neighborhood
+                      group_by(nhood) %>% 
+                      tally(sort = TRUE))
+
+sf_bike_plt <- sf_geo_trans%>%  ##combines the SF geometry dataframe with the counts of bike stations per neighborhood for plotting
+                  left_join(nhOOd_stat_tally, by = 'nhood') %>%
+                  ggplot() +
+                  geom_sf(color = 'white', aes(fill = n)) +
+                  geom_sf(data = station_sf_sf, color = 'red', size = 2) +
+                  theme(legend.position = "none")
+
+text_box <- nhOOd_stat_tally %>%  ## Creates a text_box to combine with ggplot
+              head(15) %>%
+              dplyr::rename(Neighborhood = nhood, Count = n) %>%
+              ggtexttable(theme = ttheme('mBlue', base_size = 8), rows = NULL)
+
+station_plot <- ggarrange(sf_bike_plt, text_box, heights = c(1, 0.5))  ## Full plot combining ggplot and text_box
+
+annotate_figure(station_plot,                                                 ##Adds a title to the plot
+                top = text_grob("Baywheels Bike Stations in San Francisco", 
+                                color = "red", face = "bold", size = 20))
